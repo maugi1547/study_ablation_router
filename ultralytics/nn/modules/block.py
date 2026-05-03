@@ -41,6 +41,7 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "ContrastiveHead",
+    "DifficultyAwareRouter",
     "GhostBottleneck",
     "HGBlock",
     "HGStem",
@@ -52,7 +53,6 @@ __all__ = (
     "ResNetLayer",
     "SCDown",
     "TorchVision",
-    "DifficultyAwareRouter",
 )
 
 
@@ -1970,7 +1970,6 @@ class SAVPE(nn.Module):
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 # ============================================================
@@ -1979,38 +1978,28 @@ import torch.nn.functional as F
 # Digunakan untuk Z_visual = GAP(F_P3 ⊗ A_spatial)
 # ============================================================
 class SpatialAttention(nn.Module):
-    """
-    Spatial Attention Module (SAM) dari CBAM.
-    Menghasilkan attention map 2D berdasarkan statistik
-    channel-wise (average + max pooling).
+    """Spatial Attention Module (SAM) dari CBAM. Menghasilkan attention map 2D berdasarkan statistik channel-wise
+    (average + max pooling).
     """
 
     def __init__(self, kernel_size: int = 7):
         super().__init__()
-        self.conv = nn.Conv2d(
-            2, 1, kernel_size,
-            padding=kernel_size // 2,
-            bias=False
-        )
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2, bias=False)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, C, H, W)
-        avg = torch.mean(x, dim=1, keepdim=True)   # (B, 1, H, W)
+        avg = torch.mean(x, dim=1, keepdim=True)  # (B, 1, H, W)
         mx, _ = torch.max(x, dim=1, keepdim=True)  # (B, 1, H, W)
-        attn = self.sigmoid(
-            self.conv(torch.cat([avg, mx], dim=1))
-        )                                           # (B, 1, H, W)
-        return x * attn                             # (B, C, H, W)
+        attn = self.sigmoid(self.conv(torch.cat([avg, mx], dim=1)))  # (B, 1, H, W)
+        return x * attn  # (B, C, H, W)
 
 
 # ============================================================
 # DIFFICULTY-AWARE SPATIAL ROUTER
 # ============================================================
 class DifficultyAwareRouter(nn.Module):
-    """
-    Router dinamis yang mengontrol aktivasi jalur P2 secara
-    kondisional berdasarkan tingkat kesulitan visual input.
+    """Router dinamis yang mengontrol aktivasi jalur P2 secara kondisional berdasarkan tingkat kesulitan visual input.
 
     Arsitektur internal:
         1. Z_visual : SAM(F_P3) → GAP → (B, c_p3)
@@ -2056,33 +2045,33 @@ class DifficultyAwareRouter(nn.Module):
         num_classes: int = 1,
         reg_max: int = 16,
         warmup_epochs: int = 5,
-        ablation_mode: str = 'full',
-        uncertainty_mode: str = 'all', # 🚨 TAMBAHAN: Mode Ablasi Uncertainty
-        gating_mode: str = 'gumbel', # 🚨 TAMBAHAN: Mode Ablasi Gating
+        ablation_mode: str = "full",
+        uncertainty_mode: str = "all",  # 🚨 TAMBAHAN: Mode Ablasi Uncertainty
+        gating_mode: str = "gumbel",  # 🚨 TAMBAHAN: Mode Ablasi Gating
     ):
         """
         Args:
-            c_p3          : channel P3 dari Neck
-            c_p2          : channel P2 dari Backbone
-            c2f_out       : channel output C2f P2 (sudah di dalam router)
-            n_bottleneck  : jumlah bottleneck C2f (ikuti depth scaling)
-            shortcut      : shortcut pada bottleneck C2f
-            hidden_dim    : hidden dim MLP router (default 40,
+            c_p3: channel P3 dari Neck
+            c_p2: channel P2 dari Backbone
+            c2f_out: channel output C2f P2 (sudah di dalam router)
+            n_bottleneck: jumlah bottleneck C2f (ikuti depth scaling)
+            shortcut: shortcut pada bottleneck C2f
+            hidden_dim: hidden dim MLP router (default 40,
                             sesuai proposal: input_dim → 40 → 2)
-            num_classes   : jumlah kelas untuk proxy fallback
-            reg_max       : jumlah bin DFL untuk proxy fallback
-            warmup_epochs : jumlah epoch paksa gate=1 (default 5)
+            num_classes: jumlah kelas untuk proxy fallback
+            reg_max: jumlah bin DFL untuk proxy fallback
+            warmup_epochs: jumlah epoch paksa gate=1 (default 5).
         """
         super().__init__()
         self.ablation_mode = ablation_mode
-        self.uncertainty_mode = uncertainty_mode # 🚨 TAMBAHAN: Simpan State
-        self.gating_mode = gating_mode # 🚨 TAMBAHAN: Simpan State Gating
+        self.uncertainty_mode = uncertainty_mode  # 🚨 TAMBAHAN: Simpan State
+        self.gating_mode = gating_mode  # 🚨 TAMBAHAN: Simpan State Gating
 
-        self.c_p3         = c_p3
-        self.c_p2         = c_p2
-        self.c2f_out      = c2f_out
-        self.num_classes  = num_classes
-        self.reg_max      = reg_max
+        self.c_p3 = c_p3
+        self.c_p2 = c_p2
+        self.c2f_out = c2f_out
+        self.num_classes = num_classes
+        self.reg_max = reg_max
         self.warmup_epochs = warmup_epochs
 
         # =====================================================
@@ -2097,9 +2086,7 @@ class DifficultyAwareRouter(nn.Module):
         #    Z_low = GAP(Conv1x1(F_P2_backbone))  — Persamaan (8)
         # =====================================================
         self.c_low = 16
-        self.conv_hint = nn.Conv2d(
-            c_p2, self.c_low, 1, bias=False
-        )
+        self.conv_hint = nn.Conv2d(c_p2, self.c_low, 1, bias=False)
 
         # =====================================================
         # 3. PROXY FALLBACK
@@ -2107,12 +2094,9 @@ class DifficultyAwareRouter(nn.Module):
         #    Lebih dalam dari Conv2d tunggal agar lebih ekspresif.
         # =====================================================
         self.proxy_cls = nn.Sequential(
-            nn.Conv2d(
-                c_p3, max(c_p3 // 2, 32), 3,
-                padding=1, bias=False
-            ),
+            nn.Conv2d(c_p3, max(c_p3 // 2, 32), 3, padding=1, bias=False),
             nn.SiLU(),
-            nn.Conv2d(max(c_p3 // 2, 32), num_classes, 1)
+            nn.Conv2d(max(c_p3 // 2, 32), num_classes, 1),
         )
         self.proxy_reg_dist = nn.Conv2d(c_p3, reg_max, 1)
 
@@ -2122,53 +2106,46 @@ class DifficultyAwareRouter(nn.Module):
         #    Input channel = c_p3 + c_p2 (setelah Concat+Upsample)
         # =====================================================
         from ultralytics.nn.modules import C2f
-        self.c2f_p2 = C2f(
-            c_p3 + c_p2, c2f_out,
-            n=n_bottleneck,
-            shortcut=shortcut
-        )
+
+        self.c2f_p2 = C2f(c_p3 + c_p2, c2f_out, n=n_bottleneck, shortcut=shortcut)
 
         # =====================================================
         # 5. MLP ROUTER (🚨 DIMODIFIKASI UNTUK ABLASI UNCERTAINTY)
         # =====================================================
         # Tentukan dimensi tambahan dari statistik Head
-        stat_dim = 3 if self.uncertainty_mode == 'all' else 1
+        stat_dim = 3 if self.uncertainty_mode == "all" else 1
 
-        if self.ablation_mode == 'full':
-            self.input_dim = c_p3 + self.c_low + stat_dim # 256 + 16 + 1 = 273
-        elif self.ablation_mode == 'p2_p3':
+        if self.ablation_mode == "full":
+            self.input_dim = c_p3 + self.c_low + stat_dim  # 256 + 16 + 1 = 273
+        elif self.ablation_mode == "p2_p3":
             self.input_dim = c_p3 + self.c_low
-        elif self.ablation_mode == 'p3_only':
+        elif self.ablation_mode == "p3_only":
             self.input_dim = c_p3
-        elif self.ablation_mode == 'p2_only':
+        elif self.ablation_mode == "p2_only":
             self.input_dim = self.c_low
-        elif self.ablation_mode == 'head_only':
+        elif self.ablation_mode == "head_only":
             self.input_dim = stat_dim
         else:
             raise ValueError(f"Mode ablasi '{self.ablation_mode}' tidak valid!")
 
         self.layer_norm = nn.LayerNorm(self.input_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(self.input_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, 2)
-        )
+        self.mlp = nn.Sequential(nn.Linear(self.input_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, 2))
 
-        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
 
         # =====================================================
         # 6. STATE TRAINING
         # =====================================================
         self.current_epoch = 0
-        self._is_warmup    = True
-        self.force_active  = True   # True selama warmup
+        self._is_warmup = True
+        self.force_active = True  # True selama warmup
 
         # Output untuk loss.py
         self.current_activation_prob = 0.0
-        self.loss_prob    = None
+        self.loss_prob = None
         self.last_entropy = None
-        self.last_conf    = None
-        self.last_var     = None
+        self.last_conf = None
+        self.last_var = None
 
         # =====================================================
         # 7. HOOK CACHE (diisi oleh hook_router_to_head)
@@ -2176,20 +2153,20 @@ class DifficultyAwareRouter(nn.Module):
         #    bukan tensor penuh — menghindari shape mismatch
         #    di akhir epoch dan overhead memory.
         # =====================================================
-        self.use_hook_cache   = False
-        self._cached_entropy  = None  # scalar float
-        self._cached_conf     = None  # scalar float
-        self._cached_dfl_var  = None  # scalar float
-        self._hook_handles    = []
+        self.use_hook_cache = False
+        self._cached_entropy = None  # scalar float
+        self._cached_conf = None  # scalar float
+        self._cached_dfl_var = None  # scalar float
+        self._hook_handles = []
 
         # =====================================================
         # 8. RUNNING STATS untuk normalisasi stabil
         #    Menggantikan batch-wise std yang bisa = 0
         #    saat batch size = 1 atau fitur seragam.
         # =====================================================
-        self._running_mean      = None  # (3,) EMA mean
-        self._running_std       = None  # (3,) EMA std
-        self._ema_momentum      = 0.99
+        self._running_mean = None  # (3,) EMA mean
+        self._running_std = None  # (3,) EMA std
+        self._ema_momentum = 0.99
         self._stats_initialized = False
 
         # Init bias MLP: mulai balanced (50/50)
@@ -2205,12 +2182,10 @@ class DifficultyAwareRouter(nn.Module):
     # =========================================================
 
     def set_epoch(self, epoch: int):
-        """
-        Dipanggil di awal setiap epoch dari training loop.
-        Mengontrol transisi warmup → normal.
+        """Dipanggil di awal setiap epoch dari training loop. Mengontrol transisi warmup → normal.
         """
         self.current_epoch = epoch
-        self._is_warmup   = (epoch < self.warmup_epochs)
+        self._is_warmup = epoch < self.warmup_epochs
         self.force_active = self._is_warmup
 
     def remove_hooks(self):
@@ -2218,7 +2193,7 @@ class DifficultyAwareRouter(nn.Module):
         for h in self._hook_handles:
             h.remove()
         self._hook_handles = []
-        
+
     # =========================================================
     # HOOK METHODS (PICKLE-SAFE)
     # =========================================================
@@ -2226,20 +2201,20 @@ class DifficultyAwareRouter(nn.Module):
         with torch.no_grad():
             # 🚨 FIX 1: HOOK SANITIZER (Mencegah ilusi eval mode)
             tensor_aman = output.detach().float()
-            
+
             # Jika mode eval dan tensor sudah berbentuk probabilitas (0.0 - 1.0)
             if not self.training:
                 if tensor_aman.max() <= 1.0 and tensor_aman.min() >= 0.0:
                     # Kembalikan ke ruang logit (Inverse Sigmoid)
                     tensor_aman = tensor_aman.clamp(min=1e-5, max=1.0 - 1e-5)
                     tensor_aman = torch.log(tensor_aman / (1.0 - tensor_aman))
-            
+
             # Batasi nilai ekstrem agar tidak menghasilkan NaN
             tensor_aman = tensor_aman.clamp(min=-20.0, max=20.0)
 
             B, C, H, W = tensor_aman.shape
             K = max(1, int(H * W * 0.02))
-            eps = 1e-5 # Gunakan 1e-5 untuk FP16 safe
+            eps = 1e-5  # Gunakan 1e-5 untuk FP16 safe
 
             if C == 1:
                 prob = torch.sigmoid(tensor_aman)
@@ -2254,12 +2229,12 @@ class DifficultyAwareRouter(nn.Module):
 
             flat_e = entropy_map.view(B, 1, -1)
             topk_e, _ = torch.topk(flat_e, k=K, dim=-1)
-            per_sample_e = (0.7 * topk_e.mean(dim=-1) + 0.3 * flat_e.mean(dim=-1))
+            per_sample_e = 0.7 * topk_e.mean(dim=-1) + 0.3 * flat_e.mean(dim=-1)
             self._cached_entropy = per_sample_e.mean().item()
 
             flat_c = unc_conf.view(B, 1, -1)
             topk_c, _ = torch.topk(flat_c, k=K, dim=-1)
-            per_sample_c = (0.7 * topk_c.mean(dim=-1) + 0.3 * flat_c.mean(dim=-1))
+            per_sample_c = 0.7 * topk_c.mean(dim=-1) + 0.3 * flat_c.mean(dim=-1)
             self._cached_conf = per_sample_c.mean().item()
 
     def _hook_reg(self, module, input, output):
@@ -2267,26 +2242,24 @@ class DifficultyAwareRouter(nn.Module):
             B, _, H, W = output.shape
             K = max(1, int(H * W * 0.02))
 
-            reg_one   = output[:, :self.reg_max, :, :]
+            reg_one = output[:, : self.reg_max, :, :]
             dist_prob = torch.softmax(reg_one, dim=1)
-            bins      = torch.arange(self.reg_max, device=output.device, dtype=output.dtype).view(1, self.reg_max, 1, 1)
+            bins = torch.arange(self.reg_max, device=output.device, dtype=output.dtype).view(1, self.reg_max, 1, 1)
 
-            y_hat   = (dist_prob * bins).sum(dim=1, keepdim=True)
+            y_hat = (dist_prob * bins).sum(dim=1, keepdim=True)
             var_map = (dist_prob * (bins - y_hat) ** 2).sum(dim=1, keepdim=True)
 
-            flat    = var_map.view(B, 1, -1)
+            flat = var_map.view(B, 1, -1)
             topk, _ = torch.topk(flat, k=K, dim=-1)
-            per_sample = (0.7 * topk.mean(dim=-1) + 0.3 * flat.mean(dim=-1))
+            per_sample = 0.7 * topk.mean(dim=-1) + 0.3 * flat.mean(dim=-1)
             self._cached_dfl_var = per_sample.mean().item()
+
     # =========================================================
     # NORMALISASI STABIL (EMA running stats)
     # =========================================================
 
-    def _safe_normalize(
-        self, stats: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Z-score normalisasi menggunakan EMA running stats.
+    def _safe_normalize(self, stats: torch.Tensor) -> torch.Tensor:
+        """Z-score normalisasi menggunakan EMA running stats.
 
         Lebih stabil dibanding batch-wise std karena:
         (a) tidak div-by-zero saat batch size = 1
@@ -2294,34 +2267,34 @@ class DifficultyAwareRouter(nn.Module):
         (c) bekerja sejak batch pertama (inisialisasi lazy)
 
         Args:
-            stats : (B, 3) — [entropy, conf, dfl_var] raw
+            stats: (B, 3) — [entropy, conf, dfl_var] raw
 
         Returns:
             (B, 3) — ternormalisasi, di-clamp ke [-3, 3]
         """
-       # 🚨 REVISI: Paksa input stats menjadi Float32 di awal operasi
+        # 🚨 REVISI: Paksa input stats menjadi Float32 di awal operasi
         stats_fp32 = stats.float()
 
         with torch.no_grad():
             batch_mean = stats_fp32.mean(dim=0)
             # 🚨 REVISI: eps naikkan ke 1e-4 agar aman dari div-by-zero
-            batch_std  = stats_fp32.std(dim=0, unbiased=False).clamp(min=1e-4)
+            batch_std = stats_fp32.std(dim=0, unbiased=False).clamp(min=1e-4)
 
             if not self._stats_initialized:
                 self._running_mean = batch_mean.clone()
-                self._running_std  = batch_std.clone()
+                self._running_std = batch_std.clone()
                 self._stats_initialized = True
             else:
                 m = self._ema_momentum
                 curr_mean = self._running_mean.to(device=stats.device, dtype=torch.float32)
-                curr_std  = self._running_std.to(device=stats.device, dtype=torch.float32)
-                
-                self._running_mean = (m * curr_mean + (1 - m) * batch_mean)
-                self._running_std = (m * curr_std + (1 - m) * batch_std)
+                curr_std = self._running_std.to(device=stats.device, dtype=torch.float32)
+
+                self._running_mean = m * curr_mean + (1 - m) * batch_mean
+                self._running_std = m * curr_std + (1 - m) * batch_std
 
         curr_mean_stable = self._running_mean.to(device=stats.device, dtype=torch.float32)
-        curr_std_stable  = self._running_std.to(device=stats.device, dtype=torch.float32).clamp(min=1e-4)
-        
+        curr_std_stable = self._running_std.to(device=stats.device, dtype=torch.float32).clamp(min=1e-4)
+
         # 🚨 REVISI: Hitung norm di FP32, lalu kembalikan ke tipe asal stats (FP16)
         stats_norm = (stats_fp32 - curr_mean_stable) / curr_std_stable
         return stats_norm.clamp(-3.0, 3.0).to(stats.dtype)
@@ -2330,22 +2303,17 @@ class DifficultyAwareRouter(nn.Module):
     # HITUNG STATS DARI LOGITS (dipakai proxy fallback)
     # =========================================================
 
-    def _compute_stats(
-        self,
-        cls_logits: torch.Tensor,
-        reg_logits: torch.Tensor
-    ):
-        """
-        Hitung entropy, confidence, dan DFL variance dari logits.
+    def _compute_stats(self, cls_logits: torch.Tensor, reg_logits: torch.Tensor):
+        """Hitung entropy, confidence, dan DFL variance dari logits.
 
         Args:
-            cls_logits : (B, nc, H, W)
-            reg_logits : (B, reg_max, H, W)
+            cls_logits: (B, nc, H, W)
+            reg_logits: (B, reg_max, H, W)
 
         Returns:
             avg_entropy, avg_conf, dfl_var — masing-masing (B, 1)
         """
-        eps = 1e-5 # 🚨 REVISI: eps 1e-9 terlalu kecil untuk FP16. Ubah ke 1e-5
+        eps = 1e-5  # 🚨 REVISI: eps 1e-9 terlalu kecil untuk FP16. Ubah ke 1e-5
         B, nc, H, W = cls_logits.shape
         K = max(1, int(H * W * 0.02))  # Top-2% lokasi
 
@@ -2354,44 +2322,28 @@ class DifficultyAwareRouter(nn.Module):
             prob = torch.sigmoid(cls_logits)
             # 🚨 REVISI: Gunakan clamp untuk memastikan tidak ada log(0)
             prob_safe = prob.clamp(min=eps, max=1.0 - eps)
-            entropy_map = -(
-                prob_safe * torch.log(prob_safe)
-                + (1 - prob_safe) * torch.log(1 - prob_safe)
-            )
+            entropy_map = -(prob_safe * torch.log(prob_safe) + (1 - prob_safe) * torch.log(1 - prob_safe))
             unc_conf = 1 - prob
         else:
             prob = torch.softmax(cls_logits, dim=1)
             # 🚨 REVISI: Gunakan clamp
             prob_safe = prob.clamp(min=eps, max=1.0)
-            entropy_map = -(
-                prob_safe * torch.log(prob_safe)
-            ).sum(dim=1, keepdim=True)
-            unc_conf = 1 - prob.max(
-                dim=1, keepdim=True
-            ).values
+            entropy_map = -(prob_safe * torch.log(prob_safe)).sum(dim=1, keepdim=True)
+            unc_conf = 1 - prob.max(dim=1, keepdim=True).values
 
         def topk_mean(t4d):
             flat = t4d.view(B, 1, -1)
             topk, _ = torch.topk(flat, k=K, dim=-1)
-            return (
-                0.7 * topk.mean(dim=-1)
-                + 0.3 * flat.mean(dim=-1)
-            )  # (B, 1)
+            return 0.7 * topk.mean(dim=-1) + 0.3 * flat.mean(dim=-1)  # (B, 1)
 
         avg_entropy = topk_mean(entropy_map)
-        avg_conf    = topk_mean(unc_conf)
+        avg_conf = topk_mean(unc_conf)
 
         # --- DFL Variance — Persamaan (3) & (4) ---
         dist_prob = F.softmax(reg_logits, dim=1)
-        bins = torch.arange(
-            self.reg_max,
-            device=cls_logits.device,
-            dtype=cls_logits.dtype
-        ).view(1, self.reg_max, 1, 1)
-        y_hat   = (dist_prob * bins).sum(dim=1, keepdim=True)
-        var_map = (
-            dist_prob * (bins - y_hat) ** 2
-        ).sum(dim=1, keepdim=True)
+        bins = torch.arange(self.reg_max, device=cls_logits.device, dtype=cls_logits.dtype).view(1, self.reg_max, 1, 1)
+        y_hat = (dist_prob * bins).sum(dim=1, keepdim=True)
+        var_map = (dist_prob * (bins - y_hat) ** 2).sum(dim=1, keepdim=True)
         dfl_var = topk_mean(var_map)
 
         return avg_entropy, avg_conf, dfl_var
@@ -2400,11 +2352,8 @@ class DifficultyAwareRouter(nn.Module):
     # PILIH SUMBER SINYAL UNCERTAINTY
     # =========================================================
 
-    def _get_uncertainty_signals(
-        self, f_p3: torch.Tensor
-    ):
-        """
-        Baca sinyal uncertainty dari sumber terbaik.
+    def _get_uncertainty_signals(self, f_p3: torch.Tensor):
+        """Baca sinyal uncertainty dari sumber terbaik.
 
         Prioritas 1 — Hook cache (scalar agregat):
             Nilai dari Head P3 batch sebelumnya (lag t-1).
@@ -2422,51 +2371,35 @@ class DifficultyAwareRouter(nn.Module):
             konsisten dengan pendekatan DynamicDet (Lin et al.,
             2023) yang juga menggunakan sinyal iterasi sebelumnya.
         """
-        B      = f_p3.shape[0]
+        B = f_p3.shape[0]
         device = f_p3.device
-        dtype  = f_p3.dtype
+        dtype = f_p3.dtype
 
-        e_cache = getattr(self, '_cached_entropy', None)
-        c_cache = getattr(self, '_cached_conf',    None)
-        v_cache = getattr(self, '_cached_dfl_var', None)
+        e_cache = getattr(self, "_cached_entropy", None)
+        c_cache = getattr(self, "_cached_conf", None)
+        v_cache = getattr(self, "_cached_dfl_var", None)
 
-        cache_ready = (
-            self.use_hook_cache
-            and e_cache is not None
-            and c_cache is not None
-            and v_cache is not None
-        )
+        cache_ready = self.use_hook_cache and e_cache is not None and c_cache is not None and v_cache is not None
 
         if cache_ready:
             # Broadcast scalar → (B, 1)
-            avg_entropy = torch.full(
-                (B, 1), e_cache, device=device, dtype=dtype
-            )
-            avg_conf = torch.full(
-                (B, 1), c_cache, device=device, dtype=dtype
-            )
-            dfl_var = torch.full(
-                (B, 1), v_cache, device=device, dtype=dtype
-            )
+            avg_entropy = torch.full((B, 1), e_cache, device=device, dtype=dtype)
+            avg_conf = torch.full((B, 1), c_cache, device=device, dtype=dtype)
+            dfl_var = torch.full((B, 1), v_cache, device=device, dtype=dtype)
         else:
             # Proxy fallback
             cls_logits = self.proxy_cls(f_p3)
             reg_logits = self.proxy_reg_dist(f_p3)
-            avg_entropy, avg_conf, dfl_var = self._compute_stats(
-                cls_logits, reg_logits
-            )
+            avg_entropy, avg_conf, dfl_var = self._compute_stats(cls_logits, reg_logits)
 
         return avg_entropy, avg_conf, dfl_var
-
 
     # =========================================================
     # FUNGSI UNTUK TENSORRT (DECOUPLED ENGINE)
     # =========================================================
 
     def compute_gate(self, f_p3, f_p2_back):
-        """
-        Diisolasi untuk Engine A (Front-End).
-        Hanya menjalankan Proxy Fallback dan MLP untuk menghasilkan Gate.
+        """Diisolasi untuk Engine A (Front-End). Hanya menjalankan Proxy Fallback dan MLP untuk menghasilkan Gate.
         Mendukung penuh parameter studi ablasi dimensi.
         """
         B = f_p3.shape[0]
@@ -2482,7 +2415,7 @@ class DifficultyAwareRouter(nn.Module):
 
         stats_raw = torch.cat([entropy, conf, dfl_var], dim=1)
         stats_raw = torch.nan_to_num(stats_raw, nan=0.0, posinf=10.0, neginf=-10.0)
-        
+
         # Asumsi running stats sudah terbentuk dari fase training
         stats_norm = self._safe_normalize(stats_raw)
         stats_scaled = stats_norm * self.stats_weight.to(f_p3.dtype)
@@ -2491,31 +2424,31 @@ class DifficultyAwareRouter(nn.Module):
         # 🚨 PERBAIKAN 1: SELEKSI ABLASI UNCERTAINTY
         # =========================================================
         # Gunakan getattr untuk keamanan backward compatibility
-        uncertainty_mode = getattr(self, 'uncertainty_mode', 'all')
-        
-        if uncertainty_mode == 'entropy':
+        uncertainty_mode = getattr(self, "uncertainty_mode", "all")
+
+        if uncertainty_mode == "entropy":
             selected_stats = stats_scaled[:, 0:1]
-        elif uncertainty_mode == 'conf':
+        elif uncertainty_mode == "conf":
             selected_stats = stats_scaled[:, 1:2]
-        elif uncertainty_mode == 'dfl':
+        elif uncertainty_mode == "dfl":
             selected_stats = stats_scaled[:, 2:3]
         else:
-            selected_stats = stats_scaled # Mode 'all'
+            selected_stats = stats_scaled  # Mode 'all'
 
         # =========================================================
         # 🚨 PERBAIKAN 2: FUSI Z_IN BERDASARKAN ABLATION MODE
         # =========================================================
-        ablation_mode = getattr(self, 'ablation_mode', 'full')
-        
-        if ablation_mode == 'full':
+        ablation_mode = getattr(self, "ablation_mode", "full")
+
+        if ablation_mode == "full":
             z_in = torch.cat([z_visual, z_low, selected_stats], dim=1)
-        elif ablation_mode == 'p2_p3':
+        elif ablation_mode == "p2_p3":
             z_in = torch.cat([z_visual, z_low], dim=1)
-        elif ablation_mode == 'p3_only':
+        elif ablation_mode == "p3_only":
             z_in = z_visual
-        elif ablation_mode == 'p2_only':
+        elif ablation_mode == "p2_only":
             z_in = z_low
-        elif ablation_mode == 'head_only':
+        elif ablation_mode == "head_only":
             z_in = selected_stats
         else:
             raise ValueError(f"Mode ablasi '{ablation_mode}' tidak valid!")
@@ -2523,36 +2456,34 @@ class DifficultyAwareRouter(nn.Module):
         # 3. Eksekusi MLP
         z_in_fp32 = z_in.float()
         z_norm_fp32 = F.layer_norm(
-            z_in_fp32, 
-            self.layer_norm.normalized_shape, 
-            self.layer_norm.weight.float(), 
-            self.layer_norm.bias.float(), 
-            self.layer_norm.eps
+            z_in_fp32,
+            self.layer_norm.normalized_shape,
+            self.layer_norm.weight.float(),
+            self.layer_norm.bias.float(),
+            self.layer_norm.eps,
         )
 
         h = F.linear(z_norm_fp32, self.mlp[0].weight.float(), self.mlp[0].bias.float())
         h = F.silu(h)
         logits_fp32 = F.linear(h, self.mlp[2].weight.float(), self.mlp[2].bias.float())
-        
+
         logits = (3.0 * torch.tanh(logits_fp32 / 3.0)).to(f_p3.dtype)
 
         # 4. Inferensi Keputusan Gate
-        probs = F.softmax(logits.float(), dim=1) 
+        probs = F.softmax(logits.float(), dim=1)
         gate_mask = (probs[:, 1] >= 0.50).float().view(B, 1, 1, 1)
 
-        return gate_mask # Output: (B, 1, 1, 1)
+        return gate_mask  # Output: (B, 1, 1, 1)
 
     def compute_expert(self, f_p3, f_p2_back):
-        """
-        Diisolasi untuk Engine B (P2 Expert).
-        Hanya menjalankan konvolusi berat jika dipanggil.
+        """Diisolasi untuk Engine B (P2 Expert). Hanya menjalankan konvolusi berat jika dipanggil.
         """
         f_p3_up = self.upsample(f_p3)
         f_fused = torch.cat([f_p3_up, f_p2_back], dim=1)
         f_c2f = self.c2f_p2(f_fused)
-        
+
         return f_c2f
-    
+
     # =========================================================
     # FORWARD
     # =========================================================
@@ -2560,14 +2491,14 @@ class DifficultyAwareRouter(nn.Module):
     def forward(self, x):
         """
         Args:
-            x : [f_p3, f_p2_back]
-                f_p3      : (B, c_p3, H, W)   — P3 dari Neck
-                f_p2_back : (B, c_p2, H*2, W*2) — P2 dari Backbone
+            x: [f_p3, f_p2_back]
+            f_p3: (B, c_p3, H, W) — P3 dari Neck
+            f_p2_back: (B, c_p2, H*2, W*2) — P2 dari Backbone.
 
         Returns:
             Tensor (B, c2f_out, H*2, W*2)
-            Training  : C2f selalu dieksekusi, di-scale gate (STE)
-            Inferensi : C2f di-skip jika gate=0 (true skip)
+            Training: C2f selalu dieksekusi, di-scale gate (STE)
+            Inferensi: C2f di-skip jika gate=0 (true skip)
         """
         f_p3, f_p2_back = x[0], x[1]
         B = f_p3.shape[0]
@@ -2576,7 +2507,7 @@ class DifficultyAwareRouter(nn.Module):
         # =================================================
         # LANGKAH 1: BENTUK Z_IN (DENGAN DETACH & LOGIKA ABLASI)
         # =================================================
-        
+
         # 🚨 PERBAIKAN 1: Detach input agar denda Router tidak mengalir ke Backbone
         f_p3_detached = f_p3.detach()
         f_p2_back_detached = f_p2_back.detach()
@@ -2588,8 +2519,8 @@ class DifficultyAwareRouter(nn.Module):
         # Sinyal statistik TETAP dihitung semua (Aman untuk loss.py)
         entropy, conf, dfl_var = self._get_uncertainty_signals(f_p3)
         self.last_entropy = entropy.detach()
-        self.last_conf    = conf.detach()
-        self.last_var     = dfl_var.detach()
+        self.last_conf = conf.detach()
+        self.last_var = dfl_var.detach()
 
         stats_raw = torch.cat([entropy, conf, dfl_var], dim=1)
         stats_raw = torch.nan_to_num(stats_raw, nan=0.0, posinf=10.0, neginf=-10.0)
@@ -2597,25 +2528,25 @@ class DifficultyAwareRouter(nn.Module):
         stats_scaled = stats_norm * self.stats_weight.to(f_p3.dtype)
 
         # 🚨 TAMBAHAN: Seleksi Metrik Ketidakpastian
-        if getattr(self, 'uncertainty_mode', 'all') == 'entropy':
-            selected_stats = stats_scaled[:, 0:1] # Ambil Entropi saja
-        elif self.uncertainty_mode == 'conf':
-            selected_stats = stats_scaled[:, 1:2] # Ambil Confidence saja
-        elif self.uncertainty_mode == 'dfl':
-            selected_stats = stats_scaled[:, 2:3] # Ambil DFL Variance saja
+        if getattr(self, "uncertainty_mode", "all") == "entropy":
+            selected_stats = stats_scaled[:, 0:1]  # Ambil Entropi saja
+        elif self.uncertainty_mode == "conf":
+            selected_stats = stats_scaled[:, 1:2]  # Ambil Confidence saja
+        elif self.uncertainty_mode == "dfl":
+            selected_stats = stats_scaled[:, 2:3]  # Ambil DFL Variance saja
         else:
-            selected_stats = stats_scaled         # Ambil Ketiganya (Mode 'all')
+            selected_stats = stats_scaled  # Ambil Ketiganya (Mode 'all')
 
         # 🚨 PERBAIKAN ABLASI: Fusi Kondisional Berdasarkan Mode (Ganti stats_scaled dengan selected_stats)
-        if getattr(self, 'ablation_mode', 'full') == 'full':
+        if getattr(self, "ablation_mode", "full") == "full":
             z_in = torch.cat([z_visual, z_low, selected_stats], dim=1)
-        elif self.ablation_mode == 'p2_p3':
+        elif self.ablation_mode == "p2_p3":
             z_in = torch.cat([z_visual, z_low], dim=1)
-        elif self.ablation_mode == 'p3_only':
+        elif self.ablation_mode == "p3_only":
             z_in = z_visual
-        elif self.ablation_mode == 'p2_only':
+        elif self.ablation_mode == "p2_only":
             z_in = z_low
-        elif self.ablation_mode == 'head_only':
+        elif self.ablation_mode == "head_only":
             z_in = selected_stats
         else:
             raise ValueError(f"Mode ablasi '{self.ablation_mode}' tidak valid!")
@@ -2623,24 +2554,24 @@ class DifficultyAwareRouter(nn.Module):
         # =================================================
         # LANGKAH 2: MLP → LOGITS (PURE FP32 EXECUTION)
         # =================================================
-        
+
         # 🚨 PERBAIKAN 2: Paksa seluruh eksekusi LayerNorm & MLP ke Float32
         z_in_fp32 = z_in.float()
-        
+
         # Eksekusi LayerNorm di FP32 menggunakan fungsi bawaan PyTorch (Aman)
         z_norm_fp32 = F.layer_norm(
-            z_in_fp32, 
-            self.layer_norm.normalized_shape, 
-            self.layer_norm.weight.float(), 
-            self.layer_norm.bias.float(), 
-            self.layer_norm.eps
+            z_in_fp32,
+            self.layer_norm.normalized_shape,
+            self.layer_norm.weight.float(),
+            self.layer_norm.bias.float(),
+            self.layer_norm.eps,
         )
 
         # Eksekusi manual 3-lapis MLP (Linear -> SiLU -> Linear) murni di FP32
         h = F.linear(z_norm_fp32, self.mlp[0].weight.float(), self.mlp[0].bias.float())
         h = F.silu(h)
         logits_fp32 = F.linear(h, self.mlp[2].weight.float(), self.mlp[2].bias.float())
-        
+
         # 🚨 FIX FINAL 1: Tanh Soft-Clipping (Anti-Deadlock, Batas [-3, 3])
         # Menggantikan torch.clamp agar gradien penalti selalu bisa masuk
         logits = (3.0 * torch.tanh(logits_fp32 / 3.0)).to(f_p3.dtype)
@@ -2648,30 +2579,30 @@ class DifficultyAwareRouter(nn.Module):
         # =================================================
         # LANGKAH 3: KEPUTUSAN GATE (DENGAN ABLASI)
         # =================================================
-        tau = max(0.5, 1.5 * (0.98 ** self.current_epoch))
+        tau = max(0.5, 1.5 * (0.98**self.current_epoch))
 
         if self.training:
             # 🚨 PERBAIKAN ABLASI: Logika percabangan mode gating
-            if self.gating_mode == 'gumbel':
+            if self.gating_mode == "gumbel":
                 # --- BASELINE: Gumbel-Softmax ---
                 soft = F.gumbel_softmax(logits, tau=tau, hard=False, dim=1)
                 hard = torch.zeros_like(soft).scatter_(1, soft.argmax(dim=1, keepdim=True), 1.0)
-                gate_onehot = hard - soft.detach() + soft # STE tersembunyi Gumbel
-                
-            elif self.gating_mode == 'softmax':
+                gate_onehot = hard - soft.detach() + soft  # STE tersembunyi Gumbel
+
+            elif self.gating_mode == "softmax":
                 # --- VARIAN A: Softmax Biasa (Continuous Routing) ---
                 soft = F.softmax(logits.float(), dim=1)
-                hard = soft # Tidak ada thresholding, biarkan kontinu
-                gate_onehot = soft # Gradien mengalir natural
-                
-            elif self.gating_mode == 'hard_ste':
+                hard = soft  # Tidak ada thresholding, biarkan kontinu
+                gate_onehot = soft  # Gradien mengalir natural
+
+            elif self.gating_mode == "hard_ste":
                 # --- VARIAN B: Hard-Threshold + STE Murni ---
                 soft = F.softmax(logits.float(), dim=1)
                 # Hard Threshold > 0.5
                 hard_idx = (soft[:, 1:2] >= 0.5).long()
                 hard = torch.zeros_like(soft).scatter_(1, hard_idx, 1.0)
                 # STE Manual: hard forward, soft backward
-                gate_onehot = hard - soft.detach() + soft 
+                gate_onehot = hard - soft.detach() + soft
             else:
                 raise ValueError(f"Mode gating '{self.gating_mode}' tidak valid!")
 
@@ -2679,32 +2610,31 @@ class DifficultyAwareRouter(nn.Module):
             if self._is_warmup:
                 # Memaksa P2 aktif selama warmup
                 hard_warmup = torch.zeros_like(soft)
-                hard_warmup[:, 1] = 1.0 
-                
+                hard_warmup[:, 1] = 1.0
+
                 gate_scalar_router = (hard_warmup - soft.detach() + soft)[:, 1].view(B, 1, 1, 1).to(f_p3.dtype)
                 gate_scalar_feature = hard_warmup[:, 1].view(B, 1, 1, 1).to(f_p3.dtype)
-                
+
                 self.loss_prob = torch.tensor(1.0, device=f_p3.device, requires_grad=True)
                 self.current_activation_prob = torch.tensor(1.0, device=f_p3.device)
             else:
                 gate_scalar_router = gate_onehot[:, 1].view(B, 1, 1, 1).to(f_p3.dtype)
                 gate_scalar_feature = hard[:, 1].view(B, 1, 1, 1).to(f_p3.dtype)
-                
+
                 self.loss_prob = soft[:, 1].mean()
                 self.current_activation_prob = hard[:, 1].mean().detach()
 
             # Eksekusi Jalur P2 (Selalu dieksekusi saat training untuk backprop)
             f_p3_up = self.upsample(f_p3)
             f_fused = torch.cat([f_p3_up, f_p2_back], dim=1)
-            f_c2f   = self.c2f_p2(f_fused)
-            
-            output = (f_c2f * gate_scalar_feature) + \
-                     (f_c2f.detach() * (gate_scalar_router - gate_scalar_feature))
-            
-        else: # FASE INFERENSI PYTORCH
+            f_c2f = self.c2f_p2(f_fused)
+
+            output = (f_c2f * gate_scalar_feature) + (f_c2f.detach() * (gate_scalar_router - gate_scalar_feature))
+
+        else:  # FASE INFERENSI PYTORCH
             # Untuk Varian Softmax biasa saat inferensi, tetap gunakan nilai kontinu
-            if getattr(self, 'gating_mode', 'gumbel') == 'softmax':
-                z_in = ... # (Logika z_in sama seperti di atas)
+            if getattr(self, "gating_mode", "gumbel") == "softmax":
+                z_in = ...  # (Logika z_in sama seperti di atas)
                 # Bypass fungsi compute_gate khusus untuk softmax inference
                 soft_probs = F.softmax(logits.float(), dim=1)
                 gate_mask = soft_probs[:, 1].view(B, 1, 1, 1).to(f_p3.dtype)
