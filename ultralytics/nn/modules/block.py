@@ -2056,6 +2056,9 @@ class DifficultyAwareRouter(nn.Module):
         num_classes: int = 1,
         reg_max: int = 16,
         warmup_epochs: int = 5,
+        ablation_mode: str = 'full',
+        uncertainty_mode: str = 'all', # 🚨 TAMBAHAN: Mode Ablasi Uncertainty
+        gating_mode: str = 'gumbel', # 🚨 TAMBAHAN: Mode Ablasi Gating
     ):
         """
         Args:
@@ -2071,6 +2074,9 @@ class DifficultyAwareRouter(nn.Module):
             warmup_epochs : jumlah epoch paksa gate=1 (default 5)
         """
         super().__init__()
+        self.ablation_mode = ablation_mode
+        self.uncertainty_mode = uncertainty_mode # 🚨 TAMBAHAN: Simpan State
+        self.gating_mode = gating_mode # 🚨 TAMBAHAN: Simpan State Gating
 
         self.c_p3         = c_p3
         self.c_p2         = c_p2
@@ -2123,12 +2129,24 @@ class DifficultyAwareRouter(nn.Module):
         )
 
         # =====================================================
-        # 5. MLP ROUTER
-        #    input_dim = c_p3 + 16 (low) + 3 (stats)
-        #    Arsitektur: input_dim → hidden_dim → 2
-        #    Sesuai proposal: 275 → 40 → 2
+        # 5. MLP ROUTER (🚨 DIMODIFIKASI UNTUK ABLASI UNCERTAINTY)
         # =====================================================
-        self.input_dim = c_p3 + self.c_low + 3
+        # Tentukan dimensi tambahan dari statistik Head
+        stat_dim = 3 if self.uncertainty_mode == 'all' else 1
+
+        if self.ablation_mode == 'full':
+            self.input_dim = c_p3 + self.c_low + stat_dim # 256 + 16 + 1 = 273
+        elif self.ablation_mode == 'p2_p3':
+            self.input_dim = c_p3 + self.c_low
+        elif self.ablation_mode == 'p3_only':
+            self.input_dim = c_p3
+        elif self.ablation_mode == 'p2_only':
+            self.input_dim = self.c_low
+        elif self.ablation_mode == 'head_only':
+            self.input_dim = stat_dim
+        else:
+            raise ValueError(f"Mode ablasi '{self.ablation_mode}' tidak valid!")
+
         self.layer_norm = nn.LayerNorm(self.input_dim)
         self.mlp = nn.Sequential(
             nn.Linear(self.input_dim, hidden_dim),
@@ -2449,6 +2467,7 @@ class DifficultyAwareRouter(nn.Module):
         """
         Diisolasi untuk Engine A (Front-End).
         Hanya menjalankan Proxy Fallback dan MLP untuk menghasilkan Gate.
+        Mendukung penuh parameter studi ablasi dimensi.
         """
         B = f_p3.shape[0]
 
@@ -2468,7 +2487,38 @@ class DifficultyAwareRouter(nn.Module):
         stats_norm = self._safe_normalize(stats_raw)
         stats_scaled = stats_norm * self.stats_weight.to(f_p3.dtype)
 
-        z_in = torch.cat([z_visual, z_low, stats_scaled], dim=1)
+        # =========================================================
+        # 🚨 PERBAIKAN 1: SELEKSI ABLASI UNCERTAINTY
+        # =========================================================
+        # Gunakan getattr untuk keamanan backward compatibility
+        uncertainty_mode = getattr(self, 'uncertainty_mode', 'all')
+        
+        if uncertainty_mode == 'entropy':
+            selected_stats = stats_scaled[:, 0:1]
+        elif uncertainty_mode == 'conf':
+            selected_stats = stats_scaled[:, 1:2]
+        elif uncertainty_mode == 'dfl':
+            selected_stats = stats_scaled[:, 2:3]
+        else:
+            selected_stats = stats_scaled # Mode 'all'
+
+        # =========================================================
+        # 🚨 PERBAIKAN 2: FUSI Z_IN BERDASARKAN ABLATION MODE
+        # =========================================================
+        ablation_mode = getattr(self, 'ablation_mode', 'full')
+        
+        if ablation_mode == 'full':
+            z_in = torch.cat([z_visual, z_low, selected_stats], dim=1)
+        elif ablation_mode == 'p2_p3':
+            z_in = torch.cat([z_visual, z_low], dim=1)
+        elif ablation_mode == 'p3_only':
+            z_in = z_visual
+        elif ablation_mode == 'p2_only':
+            z_in = z_low
+        elif ablation_mode == 'head_only':
+            z_in = selected_stats
+        else:
+            raise ValueError(f"Mode ablasi '{ablation_mode}' tidak valid!")
 
         # 3. Eksekusi MLP
         z_in_fp32 = z_in.float()
@@ -2488,7 +2538,7 @@ class DifficultyAwareRouter(nn.Module):
 
         # 4. Inferensi Keputusan Gate
         probs = F.softmax(logits.float(), dim=1) 
-        gate_mask = (probs[:, 1] > 0.5).float().view(B, 1, 1, 1)
+        gate_mask = (probs[:, 1] >= 0.50).float().view(B, 1, 1, 1)
 
         return gate_mask # Output: (B, 1, 1, 1)
 
@@ -2523,34 +2573,52 @@ class DifficultyAwareRouter(nn.Module):
         B = f_p3.shape[0]
         _, _, H2, W2 = f_p2_back.shape
 
-        #=================================================
-        # LANGKAH 1: BENTUK Z_IN (DENGAN DETACH ANTI-PARASIT)
+        # =================================================
+        # LANGKAH 1: BENTUK Z_IN (DENGAN DETACH & LOGIKA ABLASI)
         # =================================================
         
         # 🚨 PERBAIKAN 1: Detach input agar denda Router tidak mengalir ke Backbone
         f_p3_detached = f_p3.detach()
         f_p2_back_detached = f_p2_back.detach()
 
-        # Gunakan tensor yang sudah di-detach untuk input visual Router
+        # Ekstraksi seluruh fitur dasar terlebih dahulu
         z_visual = self.gap(self.sam(f_p3_detached)).view(B, -1)
         z_low = self.gap(self.conv_hint(f_p2_back_detached)).view(B, -1)
 
-        # Sinyal statistik tetap menggunakan f_p3 asli karena sudah ada detach() di dalamnya
+        # Sinyal statistik TETAP dihitung semua (Aman untuk loss.py)
         entropy, conf, dfl_var = self._get_uncertainty_signals(f_p3)
         self.last_entropy = entropy.detach()
         self.last_conf    = conf.detach()
         self.last_var     = dfl_var.detach()
 
         stats_raw = torch.cat([entropy, conf, dfl_var], dim=1)
-        
-        # 🚨 FIX 2: SABUK PENGAMAN STATISTIK EKSTREM
-        # Mengganti NaN jadi 0.0, dan Inf menjadi 10.0
         stats_raw = torch.nan_to_num(stats_raw, nan=0.0, posinf=10.0, neginf=-10.0)
-        
         stats_norm = self._safe_normalize(stats_raw)
         stats_scaled = stats_norm * self.stats_weight.to(f_p3.dtype)
 
-        z_in = torch.cat([z_visual, z_low, stats_scaled], dim=1)
+        # 🚨 TAMBAHAN: Seleksi Metrik Ketidakpastian
+        if getattr(self, 'uncertainty_mode', 'all') == 'entropy':
+            selected_stats = stats_scaled[:, 0:1] # Ambil Entropi saja
+        elif self.uncertainty_mode == 'conf':
+            selected_stats = stats_scaled[:, 1:2] # Ambil Confidence saja
+        elif self.uncertainty_mode == 'dfl':
+            selected_stats = stats_scaled[:, 2:3] # Ambil DFL Variance saja
+        else:
+            selected_stats = stats_scaled         # Ambil Ketiganya (Mode 'all')
+
+        # 🚨 PERBAIKAN ABLASI: Fusi Kondisional Berdasarkan Mode (Ganti stats_scaled dengan selected_stats)
+        if getattr(self, 'ablation_mode', 'full') == 'full':
+            z_in = torch.cat([z_visual, z_low, selected_stats], dim=1)
+        elif self.ablation_mode == 'p2_p3':
+            z_in = torch.cat([z_visual, z_low], dim=1)
+        elif self.ablation_mode == 'p3_only':
+            z_in = z_visual
+        elif self.ablation_mode == 'p2_only':
+            z_in = z_low
+        elif self.ablation_mode == 'head_only':
+            z_in = selected_stats
+        else:
+            raise ValueError(f"Mode ablasi '{self.ablation_mode}' tidak valid!")
 
         # =================================================
         # LANGKAH 2: MLP → LOGITS (PURE FP32 EXECUTION)
@@ -2573,20 +2641,43 @@ class DifficultyAwareRouter(nn.Module):
         h = F.silu(h)
         logits_fp32 = F.linear(h, self.mlp[2].weight.float(), self.mlp[2].bias.float())
         
-        # 🚨 FIX FINAL 1: Tanh Soft-Clipping (Anti-Deadlock, Batas [-3, 3]
+        # 🚨 FIX FINAL 1: Tanh Soft-Clipping (Anti-Deadlock, Batas [-3, 3])
         # Menggantikan torch.clamp agar gradien penalti selalu bisa masuk
         logits = (3.0 * torch.tanh(logits_fp32 / 3.0)).to(f_p3.dtype)
 
         # =================================================
-        # LANGKAH 3: KEPUTUSAN GATE
+        # LANGKAH 3: KEPUTUSAN GATE (DENGAN ABLASI)
         # =================================================
         tau = max(0.5, 1.5 * (0.98 ** self.current_epoch))
 
         if self.training:
-            soft = F.gumbel_softmax(logits, tau=tau, hard=False, dim=1)
-            
+            # 🚨 PERBAIKAN ABLASI: Logika percabangan mode gating
+            if self.gating_mode == 'gumbel':
+                # --- BASELINE: Gumbel-Softmax ---
+                soft = F.gumbel_softmax(logits, tau=tau, hard=False, dim=1)
+                hard = torch.zeros_like(soft).scatter_(1, soft.argmax(dim=1, keepdim=True), 1.0)
+                gate_onehot = hard - soft.detach() + soft # STE tersembunyi Gumbel
+                
+            elif self.gating_mode == 'softmax':
+                # --- VARIAN A: Softmax Biasa (Continuous Routing) ---
+                soft = F.softmax(logits.float(), dim=1)
+                hard = soft # Tidak ada thresholding, biarkan kontinu
+                gate_onehot = soft # Gradien mengalir natural
+                
+            elif self.gating_mode == 'hard_ste':
+                # --- VARIAN B: Hard-Threshold + STE Murni ---
+                soft = F.softmax(logits.float(), dim=1)
+                # Hard Threshold > 0.5
+                hard_idx = (soft[:, 1:2] >= 0.5).long()
+                hard = torch.zeros_like(soft).scatter_(1, hard_idx, 1.0)
+                # STE Manual: hard forward, soft backward
+                gate_onehot = hard - soft.detach() + soft 
+            else:
+                raise ValueError(f"Mode gating '{self.gating_mode}' tidak valid!")
+
+            # --- MANAJEMEN WARMUP & SCALAR GATING ---
             if self._is_warmup:
-                # --- FASE WARMUP: P2 Selalu Aktif ---
+                # Memaksa P2 aktif selama warmup
                 hard_warmup = torch.zeros_like(soft)
                 hard_warmup[:, 1] = 1.0 
                 
@@ -2596,44 +2687,39 @@ class DifficultyAwareRouter(nn.Module):
                 self.loss_prob = torch.tensor(1.0, device=f_p3.device, requires_grad=True)
                 self.current_activation_prob = torch.tensor(1.0, device=f_p3.device)
             else:
-                # --- FASE NORMAL: Keputusan Dinamis ---
-                hard = torch.zeros_like(soft).scatter_(1, soft.argmax(dim=1, keepdim=True), 1.0)
-                
-                # Gate untuk Router (STE Aktif)
-                gate_onehot = hard - soft.detach() + soft
                 gate_scalar_router = gate_onehot[:, 1].view(B, 1, 1, 1).to(f_p3.dtype)
-                
-                # Gate untuk Fitur (Hard Murni)
                 gate_scalar_feature = hard[:, 1].view(B, 1, 1, 1).to(f_p3.dtype)
                 
-                self.loss_prob = F.softmax(logits.float(), dim=1)[:, 1].mean()
+                self.loss_prob = soft[:, 1].mean()
                 self.current_activation_prob = hard[:, 1].mean().detach()
 
-            # Eksekusi Jalur P2
+            # Eksekusi Jalur P2 (Selalu dieksekusi saat training untuk backprop)
             f_p3_up = self.upsample(f_p3)
             f_fused = torch.cat([f_p3_up, f_p2_back], dim=1)
             f_c2f   = self.c2f_p2(f_fused)
             
-            # 🚨 FIX FINAL 2: The Perfect Dual Gating Formula
-            # 1. (f_c2f * gate_scalar_feature): Backbone hanya belajar jika gate ON.
-            # 2. (f_c2f.detach() * (gate_scalar_router - gate_scalar_feature)): 
-            #    Router tetap mendapat sinyal visual akurasi meski Backbone OFF.
             output = (f_c2f * gate_scalar_feature) + \
                      (f_c2f.detach() * (gate_scalar_router - gate_scalar_feature))
             
         else: # FASE INFERENSI PYTORCH
-            # Gunakan fungsi yang sudah dipecah agar konsisten
-            gate_mask = self.compute_gate(f_p3, f_p2_back)
-            self.current_activation_prob = gate_mask.mean().detach()
-
-            if gate_mask.sum() > 0:
+            # Untuk Varian Softmax biasa saat inferensi, tetap gunakan nilai kontinu
+            if getattr(self, 'gating_mode', 'gumbel') == 'softmax':
+                z_in = ... # (Logika z_in sama seperti di atas)
+                # Bypass fungsi compute_gate khusus untuk softmax inference
+                soft_probs = F.softmax(logits.float(), dim=1)
+                gate_mask = soft_probs[:, 1].view(B, 1, 1, 1).to(f_p3.dtype)
                 f_c2f = self.compute_expert(f_p3, f_p2_back)
-                output = f_c2f * gate_mask.to(f_c2f.dtype)
+                output = f_c2f * gate_mask
+                self.current_activation_prob = gate_mask.mean().detach()
             else:
-                output = torch.zeros(
-                    B, self.c2f_out, H2, W2,
-                    device=f_p3.device,
-                    dtype=f_p3.dtype
-                )
+                # Mode diskrit (Gumbel & Hard-STE) memotong secara absolut di threshold 0.5
+                gate_mask = self.compute_gate(f_p3, f_p2_back)
+                self.current_activation_prob = gate_mask.mean().detach()
+
+                if gate_mask.sum() > 0:
+                    f_c2f = self.compute_expert(f_p3, f_p2_back)
+                    output = f_c2f * gate_mask.to(f_c2f.dtype)
+                else:
+                    output = torch.zeros(B, self.c2f_out, H2, W2, device=f_p3.device, dtype=f_p3.dtype)
 
         return output

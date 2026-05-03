@@ -1710,10 +1710,27 @@ def parse_model(d, ch, verbose=True):
             # 2. PENSKALAAN BOTTLENECK (DEPTH)
             n_bottleneck_scaled = max(round(args[1] * depth), 1) if len(args) > 1 else 1
             
-            # 3. RAKIT KEMBALI ARGUMEN 
-            args = [c_p3, c_p2, c2f_out_scaled, n_bottleneck_scaled, *args[2:]]
+            # Ekstrak argumen shortcut dari YAML
+            shortcut = args[2] if len(args) > 2 else False
             
-            # 4. Set ukuran channel akhir (c2)
+            # 3. TANGKAP PARAMETER STUDI ABLASI DARI MASTER SCRIPT
+            import os
+            abl_mode = os.environ.get('ABLATION_MODE', 'full')
+            unc_mode = os.environ.get('UNCERTAINTY_MODE', 'all')
+            gate_mode = os.environ.get('GATING_MODE', 'gumbel')
+            
+            # 4. RAKIT KEMBALI ARGUMEN (Wajib Sesuai Posisional __init__)
+            # Urutan argumen: 
+            # 0: c_p3, 1: c_p2, 2: c2f_out, 3: n_bottleneck, 4: shortcut, 
+            # 5: hidden_dim (40), 6: num_classes (1), 7: reg_max (16), 8: warmup_epochs (5)
+            # 9: ablation_mode, 10: uncertainty_mode, 11: gating_mode
+            args = [
+                c_p3, c_p2, c2f_out_scaled, n_bottleneck_scaled, shortcut, 
+                40, 1, 16, 5, 
+                abl_mode, unc_mode, gate_mode
+            ]
+            
+            # 5. Set ukuran channel akhir (c2) untuk diteruskan ke layer selanjutnya
             c2 = args[2]
         # -------------------------------------
         else:
