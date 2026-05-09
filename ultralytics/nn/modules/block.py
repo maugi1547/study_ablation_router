@@ -2538,9 +2538,19 @@ class DifficultyAwareRouter(nn.Module):
 
         # 4. Inferensi Keputusan Gate
         probs = F.softmax(logits.float(), dim=1) 
-        gate_mask = (probs[:, 1] >= 0.50).float().view(B, 1, 1, 1)
-
-        return gate_mask # Output: (B, 1, 1, 1)
+        
+        # ---------------------------------------------------------
+        # OBAT PENAWAR ONNX: Percabangan dinamis
+        # ---------------------------------------------------------
+        if torch.onnx.is_in_onnx_export() or torch.jit.is_tracing():
+            # SAAT EXPORT TENSORRT: Kirim probabilitas mentah
+            # Ini mencegah ONNX membekukan logika menjadi angka 1.0 mati
+            return probs[:, 1].view(B, 1, 1, 1)
+        else:
+            # SAAT TRAINING & EVAL PYTORCH: Kirim biner (0 atau 1)
+            # Ini menjaga arsitektur Hard Routing MoE Anda tetap utuh
+            gate_mask = (probs[:, 1] >= 0.50).float().view(B, 1, 1, 1)
+            return gate_mask
 
     def compute_expert(self, f_p3, f_p2_back):
         """
